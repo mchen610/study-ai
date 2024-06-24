@@ -1,6 +1,6 @@
 import json
+import asyncio
 import openai
-from copy import deepcopy
 from textwrap import dedent
 from dotenv import load_dotenv
 
@@ -15,70 +15,60 @@ async def get_completion(system_message, prompt) -> str:
         {"role": "user", "content": prompt},
     ]
     response = await client.chat.completions.create(
-        messages, model="gpt-4o", temperature=0
+        messages=messages, model="gpt-4o", temperature=0
     )
     return response.choices[0].message.content
 
 
-async def get_topics(raw_text: str) -> dict[str, dict]:
+async def get_topic_list(raw_text: str) -> dict:
     system_message: str = dedent("""
-    Your task is to separate the given study material into topics and sub-topics
+    Your task is to separate the given study material into topics and subtopics
     by outputting a recursively-nested dictionary. Details are a description
     of the knowledge required, not the knowledge itself. Details are always
-    required but sub-topics are optional if not in the data. Details must only
-    contain information that is not covered by the sub-topics.
-    Your output must be directly JSON-parseable:
-    {
-        "Topic Name": {
+    required but subtopics are optional if not in the data. Details must only
+    contain information that is not covered by the subtopics. If subtopics is 
+    empty then you must omit the key.
+    Your output must be directly JSON-parseable (output no outside text):
+    [
+        {
+            name: str,
             "detail_list": list[str],
-            "sub_topics": [
+            "subtopic_list": [
                 {
-                    "Topic Name": { 
-                        "detail_list": list[str],
-                        "sub_topics" [...]
-                    }
-                }
+                    name: str,
+                    "detail_list": list[str],
+                    "subtopic_list" {...}
+                },
+                {...}
             ]
         },
-        "Topic Name": {...}
-    }
+        {...}
+    ]
     """)
     output = await get_completion(system_message, raw_text)
+    print(output)
     return json.loads(output)
 
-async def inject_topics_knowledge(topics: dict[str, dict]) -> dict[str, dict]:
-    new_topics = deepcopy(topics)
-    system_message = dedent("""
-    Convert the given detail_list into comprehensive markdown covering enough information to 
-    ace any exam on it. You'll be given the topic for context. Output only the information,
-    no filler or introductory text.
-    """)
-    for topic_name, topic_data in new_topics.items():
-        detail_list = topic_data.get('detail_list')
-        if not detail_list:
-            return None
-        
-        prompt = f"Topic: {topic_name}\nDetail List: {detail_list}"
-        topic_data['info'] = await get_completion(system_message, prompt)
-        sub_topics = topic_data.get('sub_topics')
-        if sub_topics:
-            sub_topics = await inject_topics_knowledge(sub_topics)
-                
-async def stringify_topics(topics: dict[str, dict], nesting_level=0, string_list=None) -> str:
-    string_list = string_list or []
-    for topic_name, topic_data in topics.items():
-        title = '#' * (nesting_level + 1) + ' ' + topic_name
-        string_list.append('\t' * nesting_level + title)
-        string_list.append('\t' * nesting_level + topic_data['info'])
-    
-    sub_topics = topic_data.get('sub_topics')
-    if sub_topics:
-        await stringify_topics(sub_topics, nesting_level + 1, string_list)
-    
-    return '\n'.join(string_list)
 
-async def pipeline(raw_text: str) -> str:
-    topics = await get_topics(raw_text)
-    topics = await inject_topics_knowledge(topics)
-    markdown_string = await stringify_topics(topics)
-    return markdown_string
+def get_topic_list_info(topic_list: list[dict], queue: asyncio.Queue):
+    for topic in topic_list:
+        asyncio.create_task(get_topic_info(topic, queue))
+
+
+async def get_topic_info(topic: dict, queue: asyncio.Queue):
+    system_message = dedent("""
+    Output comprehensive information of the topic in the given detail_list as markdown,
+    covering enough information to ace any exam on it. You'll be given the topic for context. 
+    Output only the information, no filler or introductory text.
+    """)
+    
+    detail_list = topic.get("detail_list")
+    name = topic.get('name')
+    if detail_list:
+        prompt = f"Topic: {name}\nDetail List: {detail_list}"
+        topic['info'] = await get_completion(system_message, prompt)
+        await queue.put(topic['info'])
+
+    subtopic_list = topic.get("subtopic_list")
+    if subtopic_list:
+        get_topic_list_info(subtopic_list, queue)
